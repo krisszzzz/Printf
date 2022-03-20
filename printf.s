@@ -1,270 +1,386 @@
 
-
-global _start
+global printf
 
 section .data
-IntArg  dq 8 dup (0)
-CharArg db 0
-Kris    db "Kris"
+Buffer db 2048 dup (0)
 
 section .text
 
-CaseCount equ 'x' - 'b' + 1     ; Last case is 'x', first is 'b'. Also we have one more
-                                ; Case for default
-FirstCase equ 'b'
+    ;; Macro to define which register use for printf. It depend from % number
+%macro UseReg 1
+.%1:
+  mov rax, %1
+  ret
+%endm
 
-_start:
+    ;;  Checking for flush buffer, argument is register used as a temp. 
+    ;   First arg - offset from buffer size
+    
+%macro .CheckFlush 1
 
-    ;; mov rsi, Kris
-    ;; mov rcx, 's'
-    ;; mov rdi, 1
-    ;; call CmpSpecifier
+    cmp rbx, BufferEndIndx - %1    
+    jl .NoFlush
+    call FlushBuffer
+.NoFlush:
 
-    lea rdi, Kris
+%endm
 
-    call printf
+%macro .BuffMov 0 
+    mov al, byte [rdi]
+    mov byte [rbx], al
+%endm
 
-    mov rax, 60
-    xor rdi, rdi
+%macro .DoReverse 0
 
-    syscall
+.Reverse:
+    mov r11b, byte [rbx]
+    mov r10b, byte [r12]
 
-;------------------------------------------------
+    mov byte [r12], r11b
+    mov byte [rbx], r10b
+
+    sub rbx, 1
+    add r12, 1
+
+    cmp rbx, r12
+    ja .Reverse
+
+%endm
+
+StackPrologSize equ 16
+
+BufferSize      equ 2048
+MaxItoaSize     equ 64
+BufferEndIndx   equ Buffer + BufferSize - 1
+RegArgMax       equ 4                 ; Start counting from zero
+
+
+;NOTE:::::::::::::::::::::::::::::::::::::::::::::
 ; A assembly-like printf from standard c library
 ; All parametres used in this procedure should be in stack
-; This is complies with the cdecl standart
+; This is complies with the fastcall standart
 ; For fisrt 6 parameteres you have to use NOTE: RDI, RSI, RDX, RCX, R8, R9
 ; For other parameteres use stack
-;
 ; RDI = format string
+; Destr: RAX, RDX, R15, RSI, RDI
 
 printf:
-
-    mov r10, rdi
-    sub rdi, 1                  ; To compense the add in jump
+    lea rbx, Buffer
+    xor r14, r14                ; For correct work
 
 .FindSpec:
-    add rdi, 1
-
     cmp byte [rdi], 0
     je .WriteStr
 
-    cmp byte [rdi], '%'              ; Specifier begin
-    jne .FindSpec
+    .BuffMov
 
-    call .WriteStr
+    cmp byte [rdi], '%'         ; Specifier begin
+    je .HandleSpec
+
+    add rbx, 1                  ; Go further
+    add rdi, 1
 
 
-    
+    .CheckFlush 0
+    jmp .FindSpec
 
-
-
+.HandleSpec:
+   
+    call CmpSpecifier
+    jmp .FindSpec
 
 .WriteStr:
-    sub rdi, r10
 
-    mov rdx, rdi
-    mov rsi, r10
-    mov rax, 1
-    mov rdx, r10
-    mov rdi, 1
-
-
-    syscall
+    call FlushBuffer
 
     ret
 
 
-
-;-------------------------------------------------
-; Entry: ECX - symbol to check to printf specifier
-;        RDI - descriptor of file
-;        R10 - argument number
-;        RDX - integer-type argument if 'x', 'd', 'o' or char-type argument if 'c'
-;        RSI - address of string to output if specifier is 's'
+; NOTE::::::::::::::::::::::::::::::::::::::::::::
+; Entry: RSI - address of symbol to check to printf specifier
+;        RBP - argument number
 ; If symbol is printf specifier will handle the argument
-; Destr: RAX, RCX, R8, R10
-
+; Destr: RDI, RSI, R10, RBP, RAX
+;
 
 CmpSpecifier:
 
-    sub ecx, FirstCase                ; First case is 'b'
-    mov eax, ecx
-    sub ecx, CaseCount
-    ja NoSpec
+    add rdi, 1              ; Get a specifier that stayed by one
 
-    mov ecx, eax
+.DefineSpec:
+    xor rax, rax                 ; For correct work
+    mov al, byte [rdi]         ; Get specifier from buffer
 
-    mov rcx, qword [8*ecx + JmpTable]
-    jmp rcx
+    mov rax, qword [8*rax + SpecJmpTable]
+    jmp rax
 
-JmpTable: dq .ByteSpec          ; case 'b' - binary number
-          dq .CharSpec          ; case 'c'
-          dq  NoSpec            ; case 'd'
-          dq  NoSpec            ; ...  'e'
-          dq  NoSpec            ;      'f'
-          dq  NoSpec            ;      'g'
-          dq  NoSpec            ;      'h'
-          dq  NoSpec            ;      'i'
-          dq  NoSpec            ;      'j'
-          dq  NoSpec            ;      'k'
-          dq  NoSpec            ;      'l'
-          dq  NoSpec            ;
-          dq  NoSpec            ;
-          dq  .OctSpec          ; case 'o' - octal number
-          dq  NoSpec            ; ...
-          dq  NoSpec            ;
-          dq  NoSpec            ;
-          dq  .StrSpec          ; case 's' - string to output
-          dq  NoSpec            ; ...
-          dq  NoSpec            ;
-          dq  NoSpec            ;
-          dq  NoSpec            ;
-          dq  .HexSpec          ; case 'x' - hexidecimal number
+
+; Specifier jump table including cases %b, %c, %d, %x, %o, %s, TODO: %%
+; section .data
+SpecJmpTable:
+   times '%' -  0      dq  Exit     ; cases from /000 to '$'
+                       dq  .PercSpec     ; case '%'
+   times 'b' - '%' - 1 dq  Exit     ; case from '$' to 'a'
+                       dq .ByteSpec          ; case 'b' - binary number
+                       dq .CharSpec          ; case 'c'
+                       dq .DecSpec           ; case 'd'
+   times 'o' - 'd' - 1 dq  Exit     ; Cases 'e'-'n'
+                       dq .OctSpec          ; case 'o' - octal number
+   times 's' - 'o' - 1 dq  Exit
+                       dq .StrSpec          ; case 's' - string to output
+   times 'x' - 's' - 1 dq  Exit
+                       dq .HexSpec          ; case 'x' - hexidecimal number
+   times 255 - 'x' - 1 dq  Exit                   ; All other cases
 
 
 .ByteSpec:
-    mov cl, 1
-    jmp .HandleInt
+    mov r13, 1
+                                 ; radix = 2^(cl) -> cl = 1. See The itoa2pow doc
+    call .RegDefine
+
+    jmp .Handle2pow              ; Handle integer argument
 
 .CharSpec:
-    lea rsi, CharArg            ; Save dl to CharArg
-    mov byte [rsi], dl          ; RDX - should contain a character
-    mov rax, 1
-    mov rdx, 1
+    call .RegDefine
 
-    syscall                     ; Output char
-    jmp NoSpec
+    mov byte [rbx], al
+    add rbx, 1
+
+    jmp Exit.HandledSpec
+
+.PercSpec:
+    add rdi, 1
+    jmp Exit
 
 .StrSpec:
+    call .RegDefine
 
-    call strlen
+    call CpyStrArg
 
-    mov rax, 1                  ; RSI = address of string to output
-
-    syscall
-
-    jmp NoSpec
+    jmp Exit.HandledSpec
 
 .OctSpec:
-    mov cl, 3
-    jmp .HandleInt
+    mov r13, 3
+    call .RegDefine
+    jmp .Handle2pow
+
+.DecSpec:
+    call .RegDefine
+    call itoa10
+    jmp Exit.HandledSpec
 
 .HexSpec:
-    mov cl, 4
+    mov r13, 4
+    call .RegDefine
 
-.HandleInt:
-    mov r8, rdi
-    lea rdi, IntArg             ; Convert number from rax to IntArg
-    mov rbx, rdx
+.Handle2pow:
     call itoa2pow
 
-    mov rdi, r8                 ; Wrote this by standart write function
-    mov rax, 1
-    lea rsi, IntArg
-    syscall
+    jmp Exit.HandledSpec
 
-NoSpec:
+.RegDefine:
+    cmp r14, RegArgMax          ; First 6 parameter should be transferred by registers
+                                ; The order of transferring: NOTE: RSI, RDX, RCX, R8, R9, <Stack>
+    ja UseStack
+
+    mov rax, qword [r14*8 + RegJmpTable]
+    jmp rax
+
+RegJmpTable   dq .RSI
+              dq .RDX
+              dq .RCX
+              dq .R8
+              dq .R9
+
+    UseReg RSI                   ; macro used to save value to rax from corresponding register
+    UseReg RDX
+    UseReg RCX
+    UseReg R8
+    UseReg R9
+
+UseStack:
+    mov rax, r14
+
+    sub rax, RegArgMax + 1                    ; Get from the stack the correct value
+
+    mov rax, [rsp + StackPrologSize + rax*8]  ;
     ret
 
-;-------------------------------------------------
-; Found length of string
-; Entry: RSI = address of string that end up with '\0'
-; Ret:   RDX - length
-; Destr: RDX, R8
+Exit:
+    .CheckFlush 0
+    add rbx, 1
+    ret
 
-strlen:
-  mov r8, rsi
+.HandledSpec:
+    add r14, 1
+    add rdi, 1
+    ret
+
+;NOTE:::::::::::::::::::::::::::::::::::::::::::::
+; Copy string from [RAX] to [RBX]
+; Entry: RAX - address of string to copy
+;        RBX - destination string (Buffer)
+
+CpyStrArg:
+
+.Cpy:
+    cmp byte [rax], 0
+    je .Exit
+
+    .CheckFlush 0
+
+    mov r11b, byte [rax]
+    mov byte [rbx], r11b
 
 
-.FindEnd:
-  cmp byte [rsi], 0
-  je .Exit
+    add rbx, 1
+    add rax, 1
 
-  add rsi, 1
-
-  jmp .FindEnd
+    jmp .Cpy
 
 .Exit:
-  sub rsi, r8
-  mov rdx, rsi
-  mov rsi, r8
+    ret
 
-  ret
+;NOTE:::::::::::::::::::::::::::::::::::::::::::::
+; Convert number to ASCII symbol in decimal radix
+; ENTRY: RAX - number to convert
+;        RBX - destination buffer
+; DESTR: r11, RBP, R11, RAX, RCX
 
-;-------------------------------------------------
+itoa10:
+    .CheckFlush MaxItoaSize
+
+    xor r10, r10
+    mov r10w, 10
+
+    mov r11, rdx
+    mov r12, rbx
+
+    mov rdx, rax
+    shr rdx, 32
+
+
+.UseDecimalNumber:
+    div r10d
+    add dl, '0'
+
+    mov byte [rbx], dl
+    add rbx, 1
+
+    xor rdx, rdx
+    cmp eax, 0
+    jne .UseDecimalNumber
+                               ;
+    mov rdx, r11
+
+    mov rax, rbx
+    sub rbx, 1
+
+    .DoReverse
+    mov rbx, rax
+
+    ret
+
+
+;NOTE:::::::::::::::::::::::::::::::::::::::::::::
 ; Convert integer number to string with terminate symbol '\0'
 ; Can be used only for a number system that is a multiple of a power of two
-; Entry: RDI - destination buffer to write number
-;        RBX - number to convert
-;        CL  - power of two
-; Destr: RDX, RBX, RAX, RCX, RDI
-; Ret:   RDX - Converted string length
-
+; Entry: RBX  - destination buffer to write number
+;        RAX  - number to convert
+;        R13b - power of two
+; Destr: R10, R11, RBX, R12, R13b
+; Ret:
 
 itoa2pow:
-    mov rdx, 1
-    shl rdx, cl                 ; Get the radix value to get remainder of a division to radix
-    sub rdx, 1
 
-    push rdi
+    .CheckFlush MaxItoaSize
+    
+    xchg r13b, cl
+    mov r12, rbx
+
+    mov r10, 1
+    shl r10, cl
+    sub r10, 1
 
     cmp cl, 4
     jae .UseLettersNum          ; Only needed for 16, and 32 radix system
                                 ; To indicate next numbers use letters
-
 .UseDecimalNum:
-    mov rax, rbx
-    and rax, rdx
+    mov r11, rax
+    and r11, r10                ; VAR % DIV = VAR & (DIV - 1), if DIV == power of two
 
-    add al, '0'                 ; Convertation to decimal number
+    add r11b, '0'                 ; Convertation to decimal number
                                 ;
-    stosb
-    shr rbx, cl
+    mov byte [rbx], r11b
+    add rbx, 1
 
-    cmp rbx, 0
+    shr rax, cl
+    cmp rax, 0
+
     jne .UseDecimalNum
+
     jmp .ItoaExit
 
 .UseLettersNum:
-    mov rax, rbx
-    and rax, rdx
+    mov r11, rax                ; VAR % DIV = VAR & (DIV - 1), if DIV == power of two
+    and r11, r10
 
-    cmp al, 9
-    jbe .DecimalNum
+    cmp r11b, 9
+    jbe .DecimalNum             ; Use Decimal Number
 
-    sub al, 10
-    add al, 'A'
+    sub r11b, 10                 ; Use Letters
+    add r11b, 'A'
+
     jmp .WriteSym
 
 .DecimalNum:
-    add al, '0'
+    add r11b, '0'
 
 .WriteSym:
-    stosb
+    mov byte [rbx], r11b         ; Save symbol to rdi
+    add rbx, 1
 
-    shr rbx, cl
-    cmp rbx, 0
+    shr rax, cl                 ; DIV rax to radix
+    cmp rax, 0
     jne .UseLettersNum
 
 .ItoaExit:
-    mov byte [rdi], 0            ; '\0' to end string
 
-    mov rdx, rdi
-    sub rdx, [rsp]              ; Get pushed element without pop
+    mov rax, rbx
+    sub rbx, 1
 
-    sub rdi, 1
-    pop rbx
-.Reverse:
+    .DoReverse
 
-    mov ah, byte [rdi]
-    mov ch, byte [rbx]
-    mov byte [rbx], ah
-    mov byte [rdi], ch
-    sub rdi, 1
-    add rbx, 1
+    mov rbx, rax
+    xchg r13b, cl
+    ret
 
-    cmp rdi, rbx
-    ja .Reverse
+;NOTE:::::::::::::::::::::::::::::::::::::::::::::
+; Output <Buffer> to stdout
+; Entry: RDI - offset in <Buffer> - this is variable used to save string in printf function
+
+FlushBuffer:
+    mov r10, rdx                ; Save rdx
+    mov r13, rsi                ; Save rsi
+    mov r12, rdi                ; Save rdi
+
+    lea rsi, Buffer             ; Find the length of buffer to output
+    sub rbx, rsi                ;
+    mov rdx, rbx                ;
+    add rdx, 1
+
+    mov rbx, rcx                ; Save rcx
+
+    mov rdi, 1
+    mov rax, 1
+
+    syscall
+
+    mov rdi, r12
+    mov rsi, r13
+    mov r10, rdx
+    mov rcx, rbx
+
+    lea rbx, Buffer
 
     ret
